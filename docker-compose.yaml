@@ -1,0 +1,20 @@
+services:
+  web:
+    build: .
+    ports:
+      - "9000:8080"
+    environment:
+      - ENV PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "9001:6379"
+    volumes:
+      - ./redis_data:/data
+    command: ["redis-server", "--appendonly", "yes", "--appendfilename", "appendonly.aof", "--dir", "/data"]
