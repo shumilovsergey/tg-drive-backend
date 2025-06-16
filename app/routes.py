@@ -28,20 +28,32 @@ def get_data():
     if not check_token(req):
         return jsonify({"error": "Invalid or missing token"}), 403
 
-    if 'user_id' not in req:
+    user_id = req.get('user_id')
+    if not user_id:
         return jsonify({"error": "Missing user_id"}), 400
 
-    user_id = req['user_id']
     user_key = f"user:{user_id}"
-    user_data = redis_client.get(user_key)
 
-    if user_data:
-        return jsonify({"user_id": user_id, "user_data": json.loads(user_data)})
+    try:
+        user_data_raw = redis_client.get(user_key)
+        if user_data_raw:
+            user_data = json.loads(user_data_raw)
+            return jsonify({"user_id": user_id, "user_data": user_data}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to retrieve data: {str(e)}"}), 500
 
-    default_data = []
-    redis_client.set(user_key, json.dumps(default_data))
+    # Initialize default structure if not found
+    default_data = {
+        "last_message_id": "none",
+        "files": []
+    }
 
-    return jsonify({"user_id": user_id, "user_data": default_data})
+    try:
+        redis_client.set(user_key, json.dumps(default_data))
+    except Exception as e:
+        return jsonify({"error": f"Failed to initialize user data: {str(e)}"}), 500
+
+    return jsonify({"user_id": user_id, "user_data": default_data}), 200
 
 
 @bp.route('/up_data', methods=['POST'])
@@ -51,16 +63,23 @@ def up_data():
     if not check_token(req):
         return jsonify({"error": "Invalid or missing token"}), 403
 
-    if 'user_id' not in req or 'user_data' not in req:
+    user_id = req.get('user_id')
+    user_data = req.get('user_data')
+
+    if not user_id or not user_data:
         return jsonify({"error": "Missing user_id or user_data"}), 400
 
-    user_id = req['user_id']
-    user_data = req['user_data']
-    user_key = f"user:{user_id}"
+    if not isinstance(user_data, dict):
+        return jsonify({"error": "user_data must be a dictionary"}), 400
 
-    redis_client.set(user_key, json.dumps(user_data))
+    try:
+        user_key = f"user:{user_id}"
+        redis_client.set(user_key, json.dumps(user_data))
+    except Exception as e:
+        return jsonify({"error": f"Failed to update Redis: {str(e)}"}), 500
 
-    return jsonify({"message": "User data updated", "user_id": user_id})
+    return jsonify({"message": "User data updated", "user_id": user_id}), 200
+
 
 @bp.route('/telegram', methods=['POST'])
 def telegram_webhook():
@@ -68,78 +87,85 @@ def telegram_webhook():
     message = parse_telegram_update(update)
     time_stemp = generate_name()
 
+    file_name = None
+    file_id = None
+    file_type = None
+
+    # Determine file type and name
     if message.document:
         file_name = message.title_document
         file_id = message.document
         file_type = "document"
-
     elif message.audio:
         file_name = message.title_audio
         file_id = message.audio
         file_type = "audio"
-
     elif message.photo:
         file_name = f"{time_stemp}.png"
         file_id = message.photo
         file_type = "photo"
-
     elif message.voice:
         file_name = f"голос_{time_stemp}.mp3"
         file_id = message.voice
         file_type = "voice"
-
     elif message.video:
         file_name = f"видео_{time_stemp}.mp4"
         file_id = message.video
         file_type = "video"
-
     elif message.video_note:
         file_name = f"кружок_{time_stemp}.mp4"
         file_id = message.video_note
         file_type = "video_note"
-
-    elif message.text and message.text=="/start":
+    elif message.text and message.text == "/start":
+        # Start command — return
         return jsonify({"status": "ok"}), 200
     else:
         delete_message(chat_id=message.chat_id, message_id=message.message_id)
         return jsonify({"status": "ok"}), 200
 
-
-    # file logik
-    # delete message
+    # If we got here, we received a valid file
     delete_message(chat_id=message.chat_id, message_id=message.message_id)
 
-    # get user data
+    # Get user data from Redis
     resp = requests.post(f"{API_URL}/get_data", json={
         "user_id": message.chat_id,
         "token": valid_token
     })
 
-    data = resp.json()
-    user_data = data.get("user_data", [])
+    if not resp.ok:
+        return jsonify({"error": "Failed to fetch user data"}), 500
 
+    data = resp.json()
+    user_data = data.get("user_data", {})
+    files = user_data.get("files", [])
+
+    # Append new file
     new_file = {
         "file_id": file_id,
         "file_type": file_type,
         "file_path": f"/tgDrive/{file_name}"
     }
+    files.append(new_file)
 
-    user_data.append(new_file)
-
-    # update user data
-    response = requests.post(f"{API_URL}/up_data", json={
+    # Save updated data
+    requests.post(f"{API_URL}/up_data", json={
         "user_id": message.chat_id,
         "token": valid_token,
-        "user_data": user_data
+        "user_data": {
+            "last_message_id": data.get("last_message_id", "none"),
+            "files": files
+        }
     })
 
     return jsonify({"status": "ok"}), 200
+
 
 
 @bp.route('/download', methods=['POST'])
 def download():
     req = request.get_json()
 
+    # Validate token
     if not check_token(req):
         return jsonify({"error": "Invalid or missing token"}), 403
 
@@ -147,34 +173,58 @@ def download():
     file_id = req.get("file_id")
     file_type = req.get("file_type")
 
-    if not user_id or not file_id or not file_type:
-        return jsonify({"error": "Missing data"}), 400
-    
-    if file_type == "photo":
-        method = "sendPhoto"
+    # Validate required fields
+    if not all([user_id, file_id, file_type]):
+        return jsonify({"error": "Missing user_id, file_id, or file_type"}), 400
 
-    elif file_type == "document":
-        method = "sendDocument"
+    # Map file_type to Telegram send method
+    method_map = {
+        "photo": "sendPhoto",
+        "document": "sendDocument",
+        "audio": "sendAudio",
+        "voice": "sendVoice",
+        "video": "sendVideo",
+        "video_note": "sendVideoNote"
+    }
+    method = method_map.get(file_type)
+    if not method:
+        return jsonify({"error": "Unsupported file_type"}), 400
 
-    elif file_type == "audio":
-        method = "sendAudio"
-
-    elif file_type == "voice":
-        method = "sendVoice"
-
-    elif file_type == "video":
-        method = "sendVideo"
-
-    elif file_type == "video_note":
-        method = "sendVideoNote"
-
-
+    # Send file
     send_url = f"https://api.telegram.org/bot{telegram_token}/{method}"
     payload = {
         "chat_id": user_id,
         file_type: file_id
     }
     tg_response = requests.post(send_url, json=payload)
-    print(tg_response.text)
+
+    if not tg_response.ok:
+        return jsonify({"error": "Telegram API failed", "details": tg_response.text}), 500
+
+    # Get message ID of sent file
+    last_message_id = tg_response.json().get("result", {}).get("message_id", "none")
+
+    # Get current user data
+    get_resp = requests.post(f"{API_URL}/get_data", json={
+        "user_id": user_id,
+        "token": valid_token
+    })
+    if not get_resp.ok:
+        return jsonify({"error": "Failed to fetch user data"}), 500
+
+    current_data = get_resp.json().get("user_data", {})
+    current_files = current_data.get("files", [])
+
+    # Update Redis via /up_data
+    update_resp = requests.post(f"{API_URL}/up_data", json={
+        "user_id": user_id,
+        "token": valid_token,
+        "user_data": {
+            "last_message_id": last_message_id,
+            "files": current_files
+        }
+    })
+    if not update_resp.ok:
+        return jsonify({"error": "Failed to update user data"}), 500
 
     return jsonify({"status": "ok"}), 200

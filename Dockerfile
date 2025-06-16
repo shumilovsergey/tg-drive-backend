@@ -1,7 +1,5 @@
 FROM python:3.10-slim
 
-ENV PYTHONUNBUFFERED=1
-
 # Set workdir inside the container
 WORKDIR /app
 

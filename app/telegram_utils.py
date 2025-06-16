@@ -54,8 +54,9 @@ def parse_telegram_update(update: Dict[str, Any]) -> Message:
     photo_id = photo[-1]["file_id"] if isinstance(photo, list) and photo else None
 
     voice = get("message.voice.file_id")
-    video_note = get("message.video_note.thumbnail.file_id")
-    video = get("message.video.thumbnail.file_id")
+    video_note = get("message.video_note.file_id")
+    video = get("message.video.file_id")   
+    
     document = get("message.document.file_id")
     title_document = get("message.document.file_name")
     audio = get("message.audio.file_id")
