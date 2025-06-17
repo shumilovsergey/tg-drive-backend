@@ -138,6 +138,7 @@ def telegram_webhook():
     data = resp.json()
     user_data = data.get("user_data", {})
     files = user_data.get("files", [])
+    last_id = user_data.get("last_message_id", "none")
 
     # Append new file
     new_file = {
@@ -152,7 +153,7 @@ def telegram_webhook():
         "user_id": message.chat_id,
         "token": valid_token,
         "user_data": {
-            "last_message_id": data.get("last_message_id", "none"),
+            "last_message_id": last_id,
             "files": files
         }
     })
@@ -202,7 +203,7 @@ def download():
         return jsonify({"error": "Telegram API failed", "details": tg_response.text}), 500
 
     # Get message ID of sent file
-    last_message_id = tg_response.json().get("result", {}).get("message_id", "none")
+    new_last_message_id = tg_response.json().get("result", {}).get("message_id", "none")
 
     # Get current user data
     get_resp = requests.post(f"{API_URL}/get_data", json={
@@ -211,20 +212,54 @@ def download():
     })
     if not get_resp.ok:
         return jsonify({"error": "Failed to fetch user data"}), 500
+    
+    user_data_resp = get_resp.json()
+    current_data = user_data_resp.get("user_data", {})
 
-    current_data = get_resp.json().get("user_data", {})
+    if not isinstance(current_data, dict):
+        return jsonify({"error": "Invalid user data format"}), 500
+    
     current_files = current_data.get("files", [])
+    previous_message_id = current_data.get("last_message_id", "none")
 
-    # Update Redis via /up_data
-    update_resp = requests.post(f"{API_URL}/up_data", json={
+    if previous_message_id != "none":
+        try:
+            delete_message(chat_id=user_id, message_id=previous_message_id)
+        except Exception as e:
+            print(f"Warning: Failed to delete previous message: {e}")
+
+    update_payload = {
         "user_id": user_id,
         "token": valid_token,
         "user_data": {
-            "last_message_id": last_message_id,
+            "last_message_id": new_last_message_id,
             "files": current_files
         }
-    })
+    }  
+
+    update_resp = requests.post(f"{API_URL}/up_data", json=update_payload)
+
     if not update_resp.ok:
         return jsonify({"error": "Failed to update user data"}), 500
-
     return jsonify({"status": "ok"}), 200
+
+    # current_data = get_resp.json().get("user_data", {})
+    # current_files = current_data.get("files", [])
+    # previous_message_id = current_data.get("last_message_id", "none")
+
+    # if previous_message_id != "none":
+    #     delete_message(chat_id=user_id, message_id=previous_message_id)
+
+    # # Update Redis via /up_data
+    # update_resp = requests.post(f"{API_URL}/up_data", json={
+    #     "user_id": user_id,
+    #     "token": valid_token,
+    #     "user_data": {
+    #         "last_message_id": new_last_message_id,
+    #         "files": current_files
+    #     }
+    # })
+    # if not update_resp.ok:
+    #     return jsonify({"error": "Failed to update user data"}), 500
+
+    # return jsonify({"status": "ok"}), 200
