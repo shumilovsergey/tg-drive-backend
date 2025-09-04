@@ -3,3 +3,4 @@ redis
 python-dotenv
 flask-cors
 requests
+markdown

@@ -1,10 +1,13 @@
-import json, requests
-from flask import Blueprint, request, jsonify
+import json, requests, os
+from flask import Blueprint, request, jsonify, render_template
 from app import redis_client, valid_token, telegram_token
 from datetime import datetime, timedelta
 from app.telegram_utils import parse_telegram_update
+# import markdown
 
 API_URL = "http://localhost:8080"
+
+HELLO_MESSAGE = "👋 Привет! Добро пожаловать в tgDrive — твое личное файловое хранилище.\n\nЗагружать файлы очень просто: отправь их в этот чат, и они сразу появятся в приложении. Там ты сможешь навести порядок — разложить всё по папкам, быстро найти нужное через поиск и в любой момент скачать обратно."
 
 bp = Blueprint('routes', __name__)
 
@@ -117,7 +120,35 @@ def telegram_webhook():
         file_id = message.video_note
         file_type = "video_note"
     elif message.text and message.text == "/start":
-        # Start command — return
+        # Send hello message
+        # send_url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        # payload = {
+        #     "chat_id": message.chat_id,
+        #     "text": HELLO_MESSAGE
+        # }
+
+        send_url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        payload = {
+            "chat_id": message.chat_id,
+            "text": HELLO_MESSAGE,
+            "reply_markup": json.dumps({
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "tgDrive",
+                            "web_app": {"url": "https://shumilovsergey.github.io/telegram-drive-frontend/"}
+                        },
+                        {
+                            "text": "Обо мне",
+                            "url": "https://sh-development.ru"
+                        }
+                    ]
+                ]
+            })
+        }
+
+
+        requests.post(send_url, json=payload)
         return jsonify({"status": "ok"}), 200
     else:
         delete_message(chat_id=message.chat_id, message_id=message.message_id)
@@ -144,7 +175,7 @@ def telegram_webhook():
     new_file = {
         "file_id": file_id,
         "file_type": file_type,
-        "file_path": f"/tgDrive/{file_name}"
+        "file_path": f"/{file_name}"
     }
     files.append(new_file)
 
@@ -243,23 +274,3 @@ def download():
         return jsonify({"error": "Failed to update user data"}), 500
     return jsonify({"status": "ok"}), 200
 
-    # current_data = get_resp.json().get("user_data", {})
-    # current_files = current_data.get("files", [])
-    # previous_message_id = current_data.get("last_message_id", "none")
-
-    # if previous_message_id != "none":
-    #     delete_message(chat_id=user_id, message_id=previous_message_id)
-
-    # # Update Redis via /up_data
-    # update_resp = requests.post(f"{API_URL}/up_data", json={
-    #     "user_id": user_id,
-    #     "token": valid_token,
-    #     "user_data": {
-    #         "last_message_id": new_last_message_id,
-    #         "files": current_files
-    #     }
-    # })
-    # if not update_resp.ok:
-    #     return jsonify({"error": "Failed to update user data"}), 500
-
-    # return jsonify({"status": "ok"}), 200
