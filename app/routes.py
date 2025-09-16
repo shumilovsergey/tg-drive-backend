@@ -1,8 +1,9 @@
 import json, requests, os
 from flask import Blueprint, request, jsonify, render_template
-from app import redis_client, valid_token, telegram_token
+from app import redis_client, telegram_token
 from datetime import datetime, timedelta
 from app.telegram_utils import parse_telegram_update
+from app.telegram_auth import extract_user_id_from_init_data, validate_telegram_init_data
 # import markdown
 
 API_URL = "http://localhost:8080"
@@ -11,9 +12,28 @@ HELLO_MESSAGE = "👋 Привет! Добро пожаловать в tgDrive �
 
 bp = Blueprint('routes', __name__)
 
-def check_token(req_json):
-    token = req_json.get("token")
-    return token == valid_token
+def authenticate_request(req_json):
+    """
+    Authenticate request using Telegram initData validation only.
+    Returns (is_valid: bool, user_id: int or None, error_message: str or None)
+    """
+    init_data = req_json.get("initData")
+
+    if not init_data:
+        return False, None, "Missing initData - Telegram authentication required"
+
+    try:
+        validated_user_id = extract_user_id_from_init_data(init_data, telegram_token)
+
+        # Verify the user_id in request matches the authenticated user (if provided)
+        request_user_id = req_json.get("user_id")
+        if request_user_id and str(request_user_id) != str(validated_user_id):
+            return False, None, "User ID mismatch - potential security violation"
+
+        return True, validated_user_id, None
+    except ValueError as e:
+        return False, None, f"Telegram authentication failed: {str(e)}"
+
 
 def generate_name():
     now = datetime.utcnow() + timedelta(hours=3)  # UTC+3
@@ -28,13 +48,13 @@ def delete_message(chat_id, message_id):
 def get_data():
     req = request.get_json()
 
-    if not check_token(req):
-        return jsonify({"error": "Invalid or missing token"}), 403
+    # Use new authentication system
+    is_valid, authenticated_user_id, error_msg = authenticate_request(req)
+    if not is_valid:
+        return jsonify({"error": error_msg}), 403
 
-    user_id = req.get('user_id')
-    if not user_id:
-        return jsonify({"error": "Missing user_id"}), 400
-
+    # Use authenticated user ID to prevent user impersonation
+    user_id = authenticated_user_id
     user_key = f"user:{user_id}"
 
     try:
@@ -63,14 +83,17 @@ def get_data():
 def up_data():
     req = request.get_json()
 
-    if not check_token(req):
-        return jsonify({"error": "Invalid or missing token"}), 403
+    # Use new authentication system
+    is_valid, authenticated_user_id, error_msg = authenticate_request(req)
+    if not is_valid:
+        return jsonify({"error": error_msg}), 403
 
-    user_id = req.get('user_id')
+    # Use authenticated user ID to prevent user impersonation
+    user_id = authenticated_user_id
     user_data = req.get('user_data')
 
-    if not user_id or not user_data:
-        return jsonify({"error": "Missing user_id or user_data"}), 400
+    if not user_data:
+        return jsonify({"error": "Missing user_data"}), 400
 
     if not isinstance(user_data, dict):
         return jsonify({"error": "user_data must be a dictionary"}), 400
@@ -157,19 +180,23 @@ def telegram_webhook():
     # If we got here, we received a valid file
     delete_message(chat_id=message.chat_id, message_id=message.message_id)
 
-    # Get user data from Redis
-    resp = requests.post(f"{API_URL}/get_data", json={
-        "user_id": message.chat_id,
-        "token": valid_token
-    })
+    # Get user data directly from Redis (no need for HTTP call since we're already in the backend)
+    user_key = f"user:{message.chat_id}"
+    try:
+        user_data_raw = redis_client.get(user_key)
+        if user_data_raw:
+            user_data = json.loads(user_data_raw)
+        else:
+            # Initialize default structure if not found
+            user_data = {
+                "last_message_id": "none",
+                "files": []
+            }
 
-    if not resp.ok:
-        return jsonify({"error": "Failed to fetch user data"}), 500
-
-    data = resp.json()
-    user_data = data.get("user_data", {})
-    files = user_data.get("files", [])
-    last_id = user_data.get("last_message_id", "none")
+        files = user_data.get("files", [])
+        last_id = user_data.get("last_message_id", "none")
+    except Exception as e:
+        return jsonify({"error": f"Failed to retrieve user data: {str(e)}"}), 500
 
     # Append new file
     new_file = {
@@ -179,15 +206,15 @@ def telegram_webhook():
     }
     files.append(new_file)
 
-    # Save updated data
-    requests.post(f"{API_URL}/up_data", json={
-        "user_id": message.chat_id,
-        "token": valid_token,
-        "user_data": {
+    # Save updated data directly to Redis
+    try:
+        updated_user_data = {
             "last_message_id": last_id,
             "files": files
         }
-    })
+        redis_client.set(user_key, json.dumps(updated_user_data))
+    except Exception as e:
+        return jsonify({"error": f"Failed to save user data: {str(e)}"}), 500
 
     return jsonify({"status": "ok"}), 200
 
@@ -197,17 +224,19 @@ def telegram_webhook():
 def download():
     req = request.get_json()
 
-    # Validate token
-    if not check_token(req):
-        return jsonify({"error": "Invalid or missing token"}), 403
+    # Use new authentication system
+    is_valid, authenticated_user_id, error_msg = authenticate_request(req)
+    if not is_valid:
+        return jsonify({"error": error_msg}), 403
 
-    user_id = req.get("user_id")
+    # Use authenticated user ID to prevent user impersonation
+    user_id = authenticated_user_id
     file_id = req.get("file_id")
     file_type = req.get("file_type")
 
     # Validate required fields
-    if not all([user_id, file_id, file_type]):
-        return jsonify({"error": "Missing user_id, file_id, or file_type"}), 400
+    if not all([file_id, file_type]):
+        return jsonify({"error": "Missing file_id or file_type"}), 400
 
     # Map file_type to Telegram send method
     method_map = {
@@ -236,22 +265,25 @@ def download():
     # Get message ID of sent file
     new_last_message_id = tg_response.json().get("result", {}).get("message_id", "none")
 
-    # Get current user data
-    get_resp = requests.post(f"{API_URL}/get_data", json={
-        "user_id": user_id,
-        "token": valid_token
-    })
-    if not get_resp.ok:
-        return jsonify({"error": "Failed to fetch user data"}), 500
-    
-    user_data_resp = get_resp.json()
-    current_data = user_data_resp.get("user_data", {})
+    # Get current user data directly from Redis
+    user_key = f"user:{user_id}"
+    try:
+        user_data_raw = redis_client.get(user_key)
+        if user_data_raw:
+            current_data = json.loads(user_data_raw)
+        else:
+            current_data = {
+                "last_message_id": "none",
+                "files": []
+            }
 
-    if not isinstance(current_data, dict):
-        return jsonify({"error": "Invalid user data format"}), 500
-    
-    current_files = current_data.get("files", [])
-    previous_message_id = current_data.get("last_message_id", "none")
+        if not isinstance(current_data, dict):
+            return jsonify({"error": "Invalid user data format"}), 500
+
+        current_files = current_data.get("files", [])
+        previous_message_id = current_data.get("last_message_id", "none")
+    except Exception as e:
+        return jsonify({"error": f"Failed to retrieve user data: {str(e)}"}), 500
 
     if previous_message_id != "none":
         try:
@@ -259,18 +291,14 @@ def download():
         except Exception as e:
             print(f"Warning: Failed to delete previous message: {e}")
 
-    update_payload = {
-        "user_id": user_id,
-        "token": valid_token,
-        "user_data": {
+    # Update user data directly in Redis
+    try:
+        updated_data = {
             "last_message_id": new_last_message_id,
             "files": current_files
         }
-    }  
-
-    update_resp = requests.post(f"{API_URL}/up_data", json=update_payload)
-
-    if not update_resp.ok:
-        return jsonify({"error": "Failed to update user data"}), 500
+        redis_client.set(user_key, json.dumps(updated_data))
+    except Exception as e:
+        return jsonify({"error": f"Failed to update user data: {str(e)}"}), 500
     return jsonify({"status": "ok"}), 200
 

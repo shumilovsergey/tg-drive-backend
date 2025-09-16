@@ -47,13 +47,27 @@ This is a Flask-based Telegram bot backend that provides cloud storage functiona
 ## Environment Configuration
 
 Required environment variables in `.env`:
-- `SECRET_TOKEN`: Authentication token for API endpoints
 - `REDIS_HOST`: Redis host (defaults to "redis" for Docker)
-- `TELEGRAM_BOT_TOKEN`: Telegram bot token for API operations
+- `TELEGRAM_BOT_TOKEN`: Telegram bot token for API operations and initData validation
+
+**Note**: `SECRET_TOKEN` is no longer used - authentication is now handled via Telegram initData validation.
 
 ## File Types Supported
 - Documents, audio files, photos, voice messages, videos, video notes
 - Automatic filename generation with UTC+3 timestamps for media without names
+
+## Security Implementation
+
+### Telegram Web App Authentication
+- **Secure Authentication**: Uses Telegram initData validation with HMAC-SHA256
+- **Validation Module**: `app/telegram_auth.py` handles cryptographic validation
+- **User Isolation**: Users can only access their own data (user ID enforcement)
+- **No Legacy Tokens**: Old token-based authentication has been completely removed
+
+### Key Security Functions
+- `validate_telegram_init_data()`: Validates initData cryptographically
+- `extract_user_id_from_init_data()`: Safely extracts authenticated user ID
+- `authenticate_request()`: Handles both new and legacy authentication methods
 
 ## Dependencies
 - Flask: Web framework
