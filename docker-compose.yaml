@@ -2,18 +2,38 @@ services:
   web:
     build: .
     ports:
-      - "9000:8080"
+      - "9000:8080"            # наружу торчит только web
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
     volumes:
       - .:/app
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    networks:
+      - public
+      - private
 
   redis:
     image: redis:alpine
-    ports:
-      - "9001:6379"
+    # ports:                   # <— не публикуем!
     volumes:
       - ./redis_data:/data
     command: ["redis-server", "--appendonly", "yes", "--appendfilename", "appendonly.aof", "--dir", "/data"]
+    expose:
+      - "6379"                 # доступен только внутри docker-сетей
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - private
+
+networks:
+  public:
+    name: public-tgdrive-network
+  private:
+    name: prival-tgdrive-network
+    internal: true             # трафик наружу не маршрутизируется

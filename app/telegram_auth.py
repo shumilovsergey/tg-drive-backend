@@ -20,8 +20,13 @@ def validate_telegram_init_data(init_data: str, bot_token: str, max_age_seconds:
     Raises:
         ValueError: If validation fails
     """
+    print(f"[DEBUG] Validating initData: {init_data[:50]}..." if init_data else "[DEBUG] initData is empty")
+
     if not init_data:
         raise ValueError("initData is required")
+
+    if not bot_token:
+        raise ValueError("bot_token is required for validation")
 
     # Parse the initData
     try:
